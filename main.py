@@ -1,24 +1,22 @@
-from fastapi import FastAPI, HTTPException, Depends, Body
+from fastapi import FastAPI, HTTPException, Depends
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
-from motor.motor_asyncio import AsyncIOMotorClient
-from bson import ObjectId
 from passlib.context import CryptContext
 from jose import JWTError, jwt
 from typing import List
 from datetime import datetime, timedelta
 from model import UserModel, ProjectModel, ProjectOutModel
+from mongoengine_models import User, Project
+from mongoengine import connect
 
 # Constants
 JWT_ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
 JWT_SECRET_KEY = "your_secret_key"
-MONGO_CONNECTION_STRING = 'mongodb://sdfghjke&replicaSet=globaldb&maxIdleTimeMS=120000'
+MONGO_CONNECTION_STRING = "MongoDB_Connection_String"
 MONGO_DB = "fastapi_rbac"
 
-# Database Config
-MONGO_URI = MONGO_CONNECTION_STRING
-client = AsyncIOMotorClient(MONGO_URI)
-db = client[MONGO_DB]
+# Database Config (MongoEngine)
+connect("fastapi_rbac", host=MONGO_CONNECTION_STRING)
 
 # Password Hashing
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -57,62 +55,63 @@ def role_required(required_role: str):
         return user
     return dependency
 
+
 # FastAPI App
-app = FastAPI()
+async def lifespan(app: FastAPI):
+    #  when app starts
+    print("Application Started successfully.")
+    yield
+    # when app stops
+    print("Application Stopped successfully.")
 
-@app.on_event("startup")
-async def startup():
-    print("Connected to MongoDB successfully.")
-
-@app.on_event("shutdown")
-async def shutdown():
-    client.close()
-
+app = FastAPI(lifespan=lifespan)
 # Routes
 @app.post("/register", response_model=dict)
 async def register(user: UserModel):
-    existing_user = await db.users.find_one({"username": user.username})
+    existing_user = User.objects(username=user.username).first()
     if existing_user:
         raise HTTPException(status_code=400, detail="User already exists")
 
     user.password = hash_password(user.password)
-    await db.users.insert_one(user.dict())
+    user_obj = User(username=user.username, password=user.password, role=user.role)
+    user_obj.save()
     return {"message": "User registered successfully"}
 
 @app.post("/login", response_model=dict)
 async def login(form_data: OAuth2PasswordRequestForm = Depends()):
-    user = await db.users.find_one({"username": form_data.username})
-    if user and verify_password(form_data.password, user["password"]):
-        token = create_access_token({"username": user["username"], "role": user["role"]})
+    user = User.objects(username=form_data.username).first()
+    if user and verify_password(form_data.password, user.password):
+        token = create_access_token({"username": user.username, "role": user.role})
         return {"access_token": token}
     raise HTTPException(status_code=401, detail="Invalid credentials")
 
 @app.get("/projects", response_model=List[ProjectOutModel], dependencies=[Depends(get_current_user)])
 async def get_projects():
-    projects = await db.projects.find().to_list(100)
-    return [{"id": str(p["_id"]), "name": p["name"], "description": p["description"]} for p in projects]
+    projects = Project.objects.all()
+    return [{"id": str(p.id), "name": p.name, "description": p.description} for p in projects]
 
 @app.post("/projects", response_model=dict, dependencies=[Depends(role_required("admin"))])
 async def create_project(project: ProjectModel):
-    result = await db.projects.insert_one(project.dict())
-    return {"message": "Project created successfully", "id": str(result.inserted_id)}
+    project_obj = Project(name=project.name, description=project.description)
+    project_obj.save()
+    return {"message": "Project created successfully", "id": str(project_obj.id)}
 
 @app.put("/projects/{project_id}", response_model=dict, dependencies=[Depends(role_required("admin"))])
 async def update_project(project_id: str, project: ProjectModel):
-    project_obj = await db.projects.find_one({"_id": ObjectId(project_id)})
+    project_obj = Project.objects(id=project_id).first()
     if not project_obj:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    await db.projects.update_one({"_id": ObjectId(project_id)}, {"$set": project.dict()})
+    project_obj.update(name=project.name, description=project.description)
     return {"message": "Project updated successfully"}
 
 @app.delete("/projects/{project_id}", response_model=dict, dependencies=[Depends(role_required("admin"))])
 async def delete_project(project_id: str):
-    project_obj = await db.projects.find_one({"_id": ObjectId(project_id)})
+    project_obj = Project.objects(id=project_id).first()
     if not project_obj:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    await db.projects.delete_one({"_id": ObjectId(project_id)})
+    project_obj.delete()
     return {"message": "Project deleted successfully"}
 
 @app.get("/health", response_model=dict)
